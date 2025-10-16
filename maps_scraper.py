@@ -13,6 +13,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Optional
 import pandas as pd
+import re
+try:
+    import phonenumbers
+    _HAS_PHONENUMBERS = True
+except Exception:
+    phonenumbers = None
+    _HAS_PHONENUMBERS = False
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
@@ -366,7 +373,8 @@ class GoogleMapsScraper:
                         By.CSS_SELECTOR,
                         "button[data-item-id*='phone']"
                     )
-                    business_data['Phone'] = phone_element.get_attribute('aria-label').replace('Phone: ', '')
+                    raw_phone = phone_element.get_attribute('aria-label')
+                    business_data['Phone'] = self._normalize_phone(raw_phone)
                 except NoSuchElementException:
                     try:
                         phone_element = self.driver.find_element(
@@ -374,7 +382,7 @@ class GoogleMapsScraper:
                             "//button[contains(@aria-label, 'Phone')]"
                         )
                         phone_data = phone_element.get_attribute('aria-label')
-                        business_data['Phone'] = phone_data.replace('Phone: ', '') if phone_data else ''
+                        business_data['Phone'] = self._normalize_phone(phone_data) if phone_data else ''
                     except:
                         pass
                 
@@ -430,6 +438,59 @@ class GoogleMapsScraper:
             
         except Exception as e:
             self.logger.error(f"Error saving to Excel for {keyword}: {e}")
+
+    def _normalize_phone(self, raw: Optional[str]) -> str:
+        """Normalize phone strings by removing common prefixes and non-number noise.
+
+        Examples of inputs handled:
+        - "Phone: +1 661-335-6060"
+        - "Telepon: +62 812-3456-789"
+        - "P: +1 (555) 123-4567"
+
+        Returns only the phone number with plus and digits, spaces, dashes and parentheses preserved.
+        """
+        if not raw:
+            return ""
+
+        # Remove common localized prefixes (case-insensitive)
+        raw = raw.strip()
+        # Patterns like 'Phone:', 'Phone', 'Telepon:', 'Telepon', 'P:' etc.
+        raw = re.sub(r'^(phone|telepon|p|tel)\s*[:\-]?\s*', '', raw, flags=re.IGNORECASE)
+
+        # Sometimes aria-label contains text like 'Phone: +1 555-123-4567' or 'Call: ...'
+        raw = re.sub(r'^(call|hubungi)\s*[:\-]?\s*', '', raw, flags=re.IGNORECASE)
+
+        # Trim again
+        raw = raw.strip()
+
+        # If there is any leading word like 'Mobile' remove it
+        raw = re.sub(r'^[A-Za-z\s]+[:\-]?\s*', lambda m: '' if re.search(r'[0-9\+]', m.group(0)) else raw, raw)
+
+        # Finally, try to extract a phone-like substring
+        match = re.search(r'[\+\d][\d\s\-\(\)\.\/\+]+', raw)
+        if match:
+            phone = match.group(0).strip()
+
+            # If phonenumbers is available, try to parse and format to E.164
+            if _HAS_PHONENUMBERS:
+                try:
+                    # If phone contains a leading +, parse without region
+                    if phone.startswith('+'):
+                        pn = phonenumbers.parse(phone, None)
+                    else:
+                        # Fallback region: try to detect from raw text (not implemented) -> default to 'US'
+                        pn = phonenumbers.parse(phone, 'US')
+
+                    if phonenumbers.is_valid_number(pn):
+                        return phonenumbers.format_number(pn, phonenumbers.PhoneNumberFormat.E164)
+                except Exception:
+                    # parsing failed, fall back to raw phone
+                    pass
+
+            return phone
+
+        # Fallback: return raw cleaned of excessive whitespace
+        return ' '.join(raw.split())
             
     def scrape_keyword(self, keyword: str) -> int:
         """
@@ -549,9 +610,8 @@ def main():
     
     # Example keywords - replace with load_keywords_from_csv('keywords.csv')
     keywords = [
-        "restaurant in Jakarta",
-        "coffee shop in Bali",
-        "hotel in Bandung"
+        "Cafe near Bakersfield, CA"
+        
     ]
     
     # Or load from CSV:
